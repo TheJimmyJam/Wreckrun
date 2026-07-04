@@ -22,7 +22,10 @@ export const DEFS = {
     frictionAir: 0.025,
     points: 10,
     kickback: 0.04,      // fraction of current speed shaved off
-    damage: 2,
+    // Per the design doc's target table: crates are "almost none [risk] —
+    // free points." No health cost at all — the only "risk" is the tiny
+    // speed kickback. This is the thing that makes the greedy line worth it.
+    damage: 0,
     destructible: true,
   },
   [TYPES.TOWER_BLOCK]: {
@@ -34,7 +37,9 @@ export const DEFS = {
     frictionAir: 0.03,
     points: 18,
     kickback: 0.09,
-    damage: 6,
+    // Doc calls tower risk "Med" (vs. crate's "almost none" and pillar's
+    // "severe") — a real but survivable cost, not a fast track to zero health.
+    damage: 3,
     destructible: true,
   },
   [TYPES.PILLAR]: {
