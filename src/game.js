@@ -119,14 +119,18 @@ export class Game {
     this.scoring.registerSmash(def.points, speedFactor, structureBody.position.x, structureBody.position.y, calloutText);
     this.car.applyImpact(def.kickback, def.damage);
 
-    // Give the structure a little scatter impulse away from the car for juice,
-    // proportional to car speed (heavier hits = bigger scatter).
+    // Fling the structure clear of the lane so a "smash" actually reads as
+    // one — a force nudge here is too weak to fight Matter's own collision
+    // response, so we directly set velocity for a guaranteed, visible scatter.
     if (def.destructible) {
-      const impulse = {
-        x: (structureBody.position.x - this.car.body.position.x) * 0.0006 * this.car.forwardSpeed,
-        y: -0.001 * this.car.forwardSpeed,
-      };
-      this.Body.applyForce(structureBody, structureBody.position, impulse);
+      const dx = structureBody.position.x - this.car.body.position.x;
+      const dirX = dx === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(dx);
+      const kickSpeed = this.car.forwardSpeed * (1.1 + Math.random() * 0.6);
+      this.Body.setVelocity(structureBody, {
+        x: dirX * kickSpeed * (0.5 + Math.random() * 0.6),
+        y: structureBody.velocity.y - kickSpeed * (0.4 + Math.random() * 0.3),
+      });
+      this.Body.setAngularVelocity(structureBody, (Math.random() - 0.5) * 0.6);
     }
   }
 

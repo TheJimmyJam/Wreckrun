@@ -16,7 +16,10 @@ export const DEFS = {
     strokeColor: "#7a5228",
     sprite: "crate_wood",
     size: 44,
-    mass: 3,
+    // Car is ~51 mass units (see car.js). Crates must be much lighter than
+    // that or they read as immovable walls instead of stuff you smash through.
+    density: 0.0026, // -> mass ~5 at this size
+    frictionAir: 0.025,
     points: 10,
     kickback: 0.04,      // fraction of current speed shaved off
     damage: 2,
@@ -27,7 +30,8 @@ export const DEFS = {
     strokeColor: "#7a2e20",
     sprite: "block_brick",
     size: 40,
-    mass: 6,
+    density: 0.0075, // -> mass ~12: heavier than a crate, still far lighter than the car
+    frictionAir: 0.03,
     points: 18,
     kickback: 0.09,
     damage: 6,
@@ -38,7 +42,8 @@ export const DEFS = {
     strokeColor: "#4b4f57",
     sprite: "pillar_concrete",
     size: 50,
-    mass: 999,
+    density: 0.05, // irrelevant while isStatic, kept sane in case that ever changes
+    frictionAir: 0.12,
     points: 0,
     kickback: 0.55,
     damage: 30,
@@ -56,10 +61,10 @@ export function createStructureBody(Bodies, type, x, y, extra = {}) {
   const isHazard = type === TYPES.PILLAR;
   const body = Bodies.rectangle(x, y, def.size, def.size, {
     isStatic: isHazard, // pillars never move; crates/towers are dynamic from the start
-    frictionAir: 0.12,
+    frictionAir: def.frictionAir,
     friction: 0.4,
     restitution: 0.15,
-    density: 0.01 * def.mass,
+    density: def.density,
     collisionFilter: {
       category: isHazard ? CATEGORY.HAZARD : CATEGORY.STRUCTURE,
       mask: CATEGORY.CAR | CATEGORY.STRUCTURE | CATEGORY.WALL,
