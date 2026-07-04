@@ -1,9 +1,15 @@
 // car.js — player car: steering, forward speed, health/damage
+// Phase 3: stats now come from a car definition (cars.js) + upgrade levels
+// (economy.js) instead of fixed constants, so different vehicles/upgrades
+// actually change how the car handles.
 
 import { CATEGORY } from "./physics.js";
+import { CAR_DEFS, ARMOR_HEALTH_PER_LEVEL, SPEED_BONUS_PER_LEVEL } from "./cars.js";
 
-export const CAR_WIDTH = 40;
-export const CAR_HEIGHT = 64;
+// Sedan's dimensions, kept as the default export for anything that hasn't
+// been updated to read per-instance car.width/car.height.
+export const CAR_WIDTH = CAR_DEFS.sedan.width;
+export const CAR_HEIGHT = CAR_DEFS.sedan.height;
 
 const BASE_FORWARD_SPEED = 4.2;   // world units/frame-ish (scaled by dt)
 const MAX_FORWARD_SPEED = 9.5;
@@ -13,23 +19,29 @@ const LATERAL_ACCEL = 0.9;
 const LATERAL_MAX = 6.5;
 const LATERAL_DAMPING = 0.85; // applied when no input (straighten out)
 
-const MAX_HEALTH = 100;
+const BASE_MAX_HEALTH = 100;
 
 export class Car {
-  constructor(Bodies, x, y) {
-    this.body = Bodies.rectangle(x, y, CAR_WIDTH, CAR_HEIGHT, {
+  constructor(Bodies, x, y, carDef = CAR_DEFS.sedan, upgrades = { armorLevel: 0, speedLevel: 0 }) {
+    this.carDef = carDef;
+    this.width = carDef.width;
+    this.height = carDef.height;
+
+    this.body = Bodies.rectangle(x, y, this.width, this.height, {
       frictionAir: 0.05,
       friction: 0.2,
       restitution: 0.1,
-      density: 0.02,
+      density: carDef.density,
       collisionFilter: {
         category: CATEGORY.CAR,
         mask: CATEGORY.STRUCTURE | CATEGORY.HAZARD | CATEGORY.WALL,
       },
       label: "car",
     });
-    this.health = MAX_HEALTH;
-    this.maxHealth = MAX_HEALTH;
+
+    this.maxHealth = Math.round(BASE_MAX_HEALTH * carDef.healthMult + upgrades.armorLevel * ARMOR_HEALTH_PER_LEVEL);
+    this.health = this.maxHealth;
+    this.speedMult = carDef.speedMult * (1 + upgrades.speedLevel * SPEED_BONUS_PER_LEVEL);
     this.speedPenalty = 0;      // temporary slowdown from impacts, decays over time
     this.spinOutMs = 0;         // brief control loss after a hazard hit
     this.distanceMeters = 0;
@@ -38,16 +50,18 @@ export class Car {
 
   get forwardSpeed() {
     const ramped = Math.min(
-      MAX_FORWARD_SPEED,
-      BASE_FORWARD_SPEED + this.distanceMeters * SPEED_RAMP_PER_METER
+      MAX_FORWARD_SPEED * this.speedMult,
+      (BASE_FORWARD_SPEED + this.distanceMeters * SPEED_RAMP_PER_METER) * this.speedMult
     );
     return Math.max(1.5, ramped - this.speedPenalty);
   }
 
   applyImpact(kickbackFraction, damage) {
-    this.speedPenalty += this.forwardSpeed * kickbackFraction * 2.2;
-    this.health = Math.max(0, this.health - damage);
-    if (damage >= 20) this.spinOutMs = 420;
+    const resistedKickback = kickbackFraction * this.carDef.kickbackResistance;
+    const resistedDamage = damage * this.carDef.damageResistance;
+    this.speedPenalty += this.forwardSpeed * resistedKickback * 2.2;
+    this.health = Math.max(0, this.health - resistedDamage);
+    if (resistedDamage >= 20) this.spinOutMs = 420;
     if (this.health <= 0) this.alive = false;
   }
 
@@ -59,7 +73,7 @@ export class Car {
     if (this.spinOutMs > 0) this.spinOutMs = Math.max(0, this.spinOutMs - dtMs);
 
     // Steering: reduced authority mid spin-out
-    const control = this.spinOutMs > 0 ? 0.25 : 1;
+    const control = (this.spinOutMs > 0 ? 0.25 : 1) * this.carDef.lateralAccelMult;
     let vx = this.body.velocity.x;
     if (steerInput !== 0) {
       vx += steerInput * LATERAL_ACCEL * control * dtScale;

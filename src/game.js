@@ -1,7 +1,7 @@
 // game.js — game loop + state machine (menu / play / paused / gameover)
 
 import { createPhysicsWorld, CATEGORY } from "./physics.js";
-import { Car, CAR_WIDTH, CAR_HEIGHT } from "./car.js";
+import { Car } from "./car.js";
 import { InputSystem } from "./input.js";
 import { Spawner } from "./spawner.js";
 import { DEFS, TYPES } from "./structures.js";
@@ -9,11 +9,13 @@ import { ScoringSystem } from "./scoring.js";
 import * as UI from "./ui.js";
 import * as Save from "./save.js";
 import { loadAssets } from "./assets.js";
+import { CAR_DEFS, CAR_ORDER, MAX_UPGRADE_LEVEL, ARMOR_HEALTH_PER_LEVEL, SPEED_BONUS_PER_LEVEL, coinsEarnedForRun } from "./cars.js";
+import * as Economy from "./economy.js";
 
 export const GAME_WIDTH = 960;
 export const GAME_HEIGHT = 540;
 
-const STATE = { LOADING: "loading", MENU: "menu", PLAY: "play", PAUSED: "paused", GAMEOVER: "gameover" };
+const STATE = { LOADING: "loading", MENU: "menu", GARAGE: "garage", PLAY: "play", PAUSED: "paused", GAMEOVER: "gameover" };
 
 const CALLOUTS_BY_TYPE = {
   [TYPES.TOWER_BLOCK]: null, // set per-chain below
@@ -79,7 +81,12 @@ export class Game {
     for (const b of this.spawner.active) Composite.remove(world, b);
     if (this.car) Composite.remove(world, this.car.body);
 
-    this.car = new Car(Bodies, GAME_WIDTH / 2, 0);
+    const carDef = CAR_DEFS[Economy.getSelectedCarId()] || CAR_DEFS.sedan;
+    const upgrades = {
+      armorLevel: Economy.getUpgradeLevel("armor"),
+      speedLevel: Economy.getUpgradeLevel("speed"),
+    };
+    this.car = new Car(Bodies, GAME_WIDTH / 2, 0, carDef, upgrades);
     Composite.add(world, this.car.body);
 
     this.spawner.reset(this.car.body.position.y);
@@ -175,18 +182,51 @@ export class Game {
     }
     const tap = this.input.consumeTap();
     if (tap) {
-      if (this.state === STATE.MENU || this.state === STATE.GAMEOVER) {
+      const scaled = this._cssToGamePoint(tap.x, tap.y);
+      if (this.state === STATE.MENU) {
+        const garageBtn = UI.getGarageButtonRect(GAME_WIDTH, GAME_HEIGHT);
+        if (UI.pointInRect(scaled.x, scaled.y, garageBtn)) {
+          this.state = STATE.GARAGE;
+        } else {
+          this._handleTapOrKeyStart();
+        }
+      } else if (this.state === STATE.GARAGE) {
+        this._handleGarageTap(scaled);
+      } else if (this.state === STATE.GAMEOVER) {
         this._handleTapOrKeyStart();
       } else if (this.state === STATE.PLAY || this.state === STATE.PAUSED) {
         const rect = UI.getPauseButtonRect();
-        // tap coordinates are in CSS px on the displayed canvas; caller (main.js)
-        // keeps canvas internal resolution mapped 1:1 via CSS scale, so convert:
-        const scaled = this._cssToGamePoint(tap.x, tap.y);
         if (UI.pointInRect(scaled.x, scaled.y, rect)) this._togglePause();
       }
     }
     if (this.state === STATE.MENU) {
       if (this.input.steerDirection !== 0) this._handleTapOrKeyStart();
+    }
+  }
+
+  _handleGarageTap(point) {
+    const layout = UI.getGarageLayout(GAME_WIDTH, GAME_HEIGHT, CAR_ORDER, ["armor", "speed"]);
+
+    if (UI.pointInRect(point.x, point.y, layout.backBtn)) {
+      this.state = STATE.MENU;
+      return;
+    }
+
+    for (const { carId, rect } of layout.carRows) {
+      if (!UI.pointInRect(point.x, point.y, rect)) continue;
+      const def = CAR_DEFS[carId];
+      if (Economy.ownsCar(carId)) {
+        Economy.setSelectedCarId(carId);
+      } else {
+        Economy.buyCar(carId, def.price);
+      }
+      return;
+    }
+
+    for (const { track, rect } of layout.upgradeRows) {
+      if (!UI.pointInRect(point.x, point.y, rect)) continue;
+      Economy.buyUpgrade(track);
+      return;
     }
   }
 
@@ -224,6 +264,8 @@ export class Game {
       const result = Save.submitRun(this.scoring.score, this.scoring.distanceMeters);
       this.isNewBest = result.bestScore <= this.scoring.score && this.scoring.score > this.best.bestScore;
       this.best = result;
+      this.coinsAwarded = coinsEarnedForRun(this.scoring.score);
+      Economy.addCoins(this.coinsAwarded);
       this.state = STATE.GAMEOVER;
     }
   }
@@ -246,6 +288,21 @@ export class Game {
       return;
     }
 
+    if (this.state === STATE.GARAGE) {
+      UI.drawGarage(this.ctx, GAME_WIDTH, GAME_HEIGHT, {
+        cars: CAR_DEFS,
+        carOrder: CAR_ORDER,
+        coins: Economy.getCoins(),
+        ownedIds: Economy.getOwnedCarIds(),
+        selectedId: Economy.getSelectedCarId(),
+        upgrades: {
+          armor: this._upgradeDisplayInfo("armor"),
+          speed: this._upgradeDisplayInfo("speed"),
+        },
+      });
+      return;
+    }
+
     // Road background
     this._drawRoadBackground();
     if (!this.images.bg_road_city) this._drawLaneMarkings(); // fallback art already has lane markings baked in
@@ -263,7 +320,7 @@ export class Game {
     }
 
     if (this.state === STATE.MENU) {
-      UI.drawMenu(this.ctx, GAME_WIDTH, GAME_HEIGHT, this.best);
+      UI.drawMenu(this.ctx, GAME_WIDTH, GAME_HEIGHT, this.best, Economy.getCoins());
     } else if (this.state === STATE.PAUSED) {
       UI.drawPaused(this.ctx, GAME_WIDTH, GAME_HEIGHT);
     } else if (this.state === STATE.GAMEOVER) {
@@ -271,11 +328,19 @@ export class Game {
         this.ctx,
         GAME_WIDTH,
         GAME_HEIGHT,
-        { score: this.scoring.score, distanceMeters: this.scoring.distanceMeters },
+        { score: this.scoring.score, distanceMeters: this.scoring.distanceMeters, coinsAwarded: this.coinsAwarded },
         this.best,
         this.isNewBest
       );
     }
+  }
+
+  _upgradeDisplayInfo(track) {
+    const level = Economy.getUpgradeLevel(track);
+    const cost = Economy.getUpgradeCost(track);
+    const description =
+      track === "armor" ? `+${ARMOR_HEALTH_PER_LEVEL} max health` : `+${Math.round(SPEED_BONUS_PER_LEVEL * 100)}% top speed`;
+    return { level, maxLevel: MAX_UPGRADE_LEVEL, cost, description };
   }
 
   _drawRoadBackground() {
@@ -347,25 +412,38 @@ export class Game {
     const { ctx, car } = this;
     const { x, y } = this._worldToScreen(car.body.position.x, car.body.position.y);
     const sprite = this.images.car_default;
+    const w = car.width;
+    const h = car.height;
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(car.body.angle);
     if (sprite) {
       // car_default.png is drawn with the front pointing up, matching the car's
       // forward-is-up orientation, so no extra rotation offset is needed.
-      ctx.drawImage(sprite, -CAR_WIDTH / 2, -CAR_HEIGHT / 2, CAR_WIDTH, CAR_HEIGHT);
+      ctx.drawImage(sprite, -w / 2, -h / 2, w, h);
+      // Non-default cars don't have unique art yet (Phase 3 art pack has the
+      // prompts) — tint the default sprite so each vehicle at least reads as
+      // a distinct car in the garage/on the road.
+      if (car.carDef.tint) {
+        ctx.globalCompositeOperation = "source-atop";
+        ctx.fillStyle = car.carDef.tint;
+        ctx.globalAlpha = 0.55;
+        ctx.fillRect(-w / 2, -h / 2, w, h);
+        ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = "source-over";
+      }
       if (car.spinOutMs > 0) {
         ctx.fillStyle = "rgba(255,80,80,0.35)";
-        ctx.fillRect(-CAR_WIDTH / 2, -CAR_HEIGHT / 2, CAR_WIDTH, CAR_HEIGHT);
+        ctx.fillRect(-w / 2, -h / 2, w, h);
       }
     } else {
-      ctx.fillStyle = car.spinOutMs > 0 ? "#ff6b6b" : "#e63946";
+      ctx.fillStyle = car.spinOutMs > 0 ? "#ff6b6b" : car.carDef.tint || "#e63946";
       ctx.strokeStyle = "#7a1620";
       ctx.lineWidth = 3;
-      ctx.fillRect(-CAR_WIDTH / 2, -CAR_HEIGHT / 2, CAR_WIDTH, CAR_HEIGHT);
-      ctx.strokeRect(-CAR_WIDTH / 2, -CAR_HEIGHT / 2, CAR_WIDTH, CAR_HEIGHT);
+      ctx.fillRect(-w / 2, -h / 2, w, h);
+      ctx.strokeRect(-w / 2, -h / 2, w, h);
       ctx.fillStyle = "#a8dadc";
-      ctx.fillRect(-CAR_WIDTH / 2 + 6, -CAR_HEIGHT / 2 + 8, CAR_WIDTH - 12, 14);
+      ctx.fillRect(-w / 2 + 6, -h / 2 + 8, w - 12, 14);
     }
     ctx.restore();
   }
