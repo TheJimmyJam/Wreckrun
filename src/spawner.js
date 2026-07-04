@@ -1,7 +1,10 @@
-// spawner.js — procedural structure/hazard generation
-// Phase 1 set only: crates, brick towers, one hazard (concrete pillar).
+// spawner.js — procedural structure/hazard generation.
+// Phase 4: hazard mix now varies by theme (themes.js) and lane density ramps
+// up with distance — but never fills all 3 lanes, so there's always at least
+// one safe line through, per the design doc.
 
 import { TYPES, createStructureBody, createTower } from "./structures.js";
+import { getThemeForDistance } from "./themes.js";
 
 const SPAWN_SPACING_BASE = 260;   // world units between spawn rows at start
 const SPAWN_SPACING_MIN = 150;    // tightens as distance increases (difficulty ramp)
@@ -48,37 +51,56 @@ export class Spawner {
     const created = [];
     const margin = 50;
     const usableWidth = this.roadWidth - margin * 2;
-
-    // Weighted pick of row layout. Always leave a "safe line" per the design doc.
-    const roll = Math.random();
     const laneCount = 3;
     const laneWidth = usableWidth / laneCount;
     const lanes = [0, 1, 2];
 
-    // Pick which lanes get something; always keep at least one lane clear.
-    const numFilled = 1 + Math.floor(Math.random() * 2); // 1 or 2 of 3 lanes filled
+    // Lane density ramp: more likely to fill 2 of 3 lanes as distance grows,
+    // but NEVER all 3 — the doc requires at least one safe line every row.
+    const pTwoLanes = Math.min(0.85, 0.35 + distanceMeters * 0.0006);
+    const numFilled = Math.random() < pTwoLanes ? 2 : 1;
     const shuffled = lanes.sort(() => Math.random() - 0.5);
     const filledLanes = shuffled.slice(0, numFilled);
+
+    const theme = getThemeForDistance(distanceMeters);
 
     for (const lane of filledLanes) {
       const laneCenterX = margin + laneWidth * lane + laneWidth / 2;
       const jitter = (Math.random() - 0.5) * laneWidth * 0.3;
       const x = laneCenterX + jitter;
 
-      const pillarChance = Math.min(0.18, 0.05 + distanceMeters * 0.0004);
-      const towerChance = 0.35;
-
-      if (Math.random() < pillarChance) {
-        created.push(createStructureBody(this.Bodies, TYPES.PILLAR, x, y));
-      } else if (Math.random() < towerChance) {
-        created.push(...createTower(this.Bodies, x, y, 2 + Math.floor(Math.random() * 2)));
-      } else {
-        created.push(createStructureBody(this.Bodies, TYPES.CRATE, x, y));
-      }
+      created.push(...this._pickAndCreate(x, y, distanceMeters, theme));
     }
 
     this.active.push(...created);
     return created;
+  }
+
+  /** Weighted type pick for one spawn point, scaled by distance + theme mix. */
+  _pickAndCreate(x, y, distanceMeters, theme) {
+    // Base weights (before theme multipliers) are proportions, not independent
+    // probabilities — they're normalized by their sum below, so every theme's
+    // mix multipliers actually shift the odds instead of just being additive
+    // on top of an implicit "whatever's left over goes to crates" default.
+    const weights = [
+      { type: TYPES.PILLAR, w: Math.min(0.18, 0.05 + distanceMeters * 0.0004) * theme.mix.pillar },
+      { type: TYPES.TNT, w: Math.min(0.14, 0.04 + distanceMeters * 0.0003) * theme.mix.tnt },
+      { type: TYPES.TOWER_BLOCK, w: 0.28 * theme.mix.tower },
+      { type: TYPES.GLASS, w: 0.18 * theme.mix.glass },
+      { type: TYPES.CRATE, w: 0.32 * theme.mix.crate },
+    ];
+    const total = weights.reduce((sum, e) => sum + e.w, 0);
+    let roll = Math.random() * total;
+    for (const { type, w } of weights) {
+      if (roll < w) {
+        if (type === TYPES.TOWER_BLOCK) {
+          return createTower(this.Bodies, x, y, 2 + Math.floor(Math.random() * 2));
+        }
+        return [createStructureBody(this.Bodies, type, x, y)];
+      }
+      roll -= w;
+    }
+    return [createStructureBody(this.Bodies, TYPES.CRATE, x, y)]; // floating-point fallback
   }
 
   /** Returns bodies that have scrolled far behind the car and should be removed. */

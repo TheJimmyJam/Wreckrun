@@ -1,5 +1,8 @@
-// structures.js — target/hazard definitions (Phase 1 set: crate, brick tower, concrete pillar)
-// Placeholder art: colored rectangles. Real sprites drop in at Phase 2.
+// structures.js — target/hazard definitions.
+// Phase 1 set: crate, brick tower, concrete pillar (placeholder art).
+// Phase 4 adds: glass pane (free points, litters debris) and TNT barrel
+// (chain-detonates nearby TNT, big knockback) — real art for both already
+// dropped in during Phase 2.
 
 import { CATEGORY } from "./physics.js";
 
@@ -7,6 +10,8 @@ export const TYPES = {
   CRATE: "crate",
   TOWER_BLOCK: "tower_block",
   PILLAR: "pillar",
+  GLASS: "glass",
+  TNT: "tnt",
 };
 
 // Visual + gameplay constants per type
@@ -53,6 +58,32 @@ export const DEFS = {
     kickback: 0.55,
     damage: 30,
     destructible: false,
+    isHazard: true, // static, indestructible
+  },
+  [TYPES.GLASS]: {
+    color: "#5fb3c9",
+    strokeColor: "#2f6b7a",
+    sprite: "glass_pane",
+    size: 40,
+    density: 0.002, // very light — "none [risk], but debris litters the lane"
+    frictionAir: 0.02,
+    points: 15,
+    kickback: 0.02,
+    damage: 0, // doc: glass risk is "None, but debris litters the lane" — no health cost
+    destructible: true,
+  },
+  [TYPES.TNT]: {
+    color: "#c23b2c",
+    strokeColor: "#7a1f14",
+    sprite: "tnt_barrel",
+    size: 46,
+    density: 0.004,
+    frictionAir: 0.02,
+    points: 30, // "High" per doc's target table
+    kickback: 0.22, // "Big blast knock-back"
+    damage: 12, // "can clear or can hurt" — real cost, well short of the pillar's severe hit
+    destructible: true,
+    explosionRadius: 150, // chain-detonates other unhit TNT barrels within this radius
   },
 };
 
@@ -63,9 +94,9 @@ let bodyIdCounter = 1;
  */
 export function createStructureBody(Bodies, type, x, y, extra = {}) {
   const def = DEFS[type];
-  const isHazard = type === TYPES.PILLAR;
+  const isHazard = !!def.isHazard;
   const body = Bodies.rectangle(x, y, def.size, def.size, {
-    isStatic: isHazard, // pillars never move; crates/towers are dynamic from the start
+    isStatic: isHazard, // pillars never move; everything else is dynamic from the start
     frictionAir: def.frictionAir,
     friction: 0.4,
     restitution: 0.15,

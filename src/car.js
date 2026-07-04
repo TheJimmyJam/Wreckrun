@@ -46,6 +46,7 @@ export class Car {
     this.spinOutMs = 0;         // brief control loss after a hazard hit
     this.distanceMeters = 0;
     this.alive = true;
+    this.traction = 1.0;        // set each frame by game.js from the current theme (ice = slippery)
   }
 
   get forwardSpeed() {
@@ -72,14 +73,18 @@ export class Car {
     this.speedPenalty = Math.max(0, this.speedPenalty - 0.06 * dtScale);
     if (this.spinOutMs > 0) this.spinOutMs = Math.max(0, this.spinOutMs - dtMs);
 
-    // Steering: reduced authority mid spin-out
-    const control = (this.spinOutMs > 0 ? 0.25 : 1) * this.carDef.lateralAccelMult;
+    // Steering: reduced authority mid spin-out, and on ice (this.traction < 1)
+    // both the steering response and the "straighten out" damping are weaker,
+    // so the car keeps sliding instead of snapping back — the ice theme's
+    // signature mechanic.
+    const control = (this.spinOutMs > 0 ? 0.25 : 1) * this.carDef.lateralAccelMult * this.traction;
+    const damping = 1 - (1 - LATERAL_DAMPING) * this.traction;
     let vx = this.body.velocity.x;
     if (steerInput !== 0) {
       vx += steerInput * LATERAL_ACCEL * control * dtScale;
       vx = Math.max(-LATERAL_MAX, Math.min(LATERAL_MAX, vx));
     } else {
-      vx *= Math.pow(LATERAL_DAMPING, dtScale);
+      vx *= Math.pow(damping, dtScale);
     }
 
     const vy = -this.forwardSpeed; // negative y = forward (up-screen)

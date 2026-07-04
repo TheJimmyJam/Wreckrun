@@ -11,6 +11,7 @@ import * as Save from "./save.js";
 import { loadAssets } from "./assets.js";
 import { CAR_DEFS, CAR_ORDER, MAX_UPGRADE_LEVEL, ARMOR_HEALTH_PER_LEVEL, SPEED_BONUS_PER_LEVEL, coinsEarnedForRun } from "./cars.js";
 import * as Economy from "./economy.js";
+import { getThemeForDistance, THEMES } from "./themes.js";
 
 export const GAME_WIDTH = 960;
 export const GAME_HEIGHT = 540;
@@ -93,6 +94,7 @@ export class Game {
     this.scoring.reset();
     this.cameraOffsetY = 0;
     this.screenCarY = GAME_HEIGHT * 0.76;
+    this.currentTheme = THEMES[0];
   }
 
   _bindCollisions() {
@@ -121,6 +123,8 @@ export class Game {
       calloutText = "WRECKED!";
     } else if (info.type === TYPES.TOWER_BLOCK) {
       calloutText = this.scoring.combo >= 3 ? "DEMOLITION!" : null;
+    } else if (info.type === TYPES.TNT) {
+      calloutText = "BOOM!"; // may get overwritten below with a chain count
     }
 
     this.scoring.registerSmash(def.points, speedFactor, structureBody.position.x, structureBody.position.y, calloutText);
@@ -130,14 +134,56 @@ export class Game {
     // one — a force nudge here is too weak to fight Matter's own collision
     // response, so we directly set velocity for a guaranteed, visible scatter.
     if (def.destructible) {
-      const dx = structureBody.position.x - this.car.body.position.x;
-      const dirX = dx === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(dx);
-      const kickSpeed = this.car.forwardSpeed * (1.1 + Math.random() * 0.6);
-      this.Body.setVelocity(structureBody, {
-        x: dirX * kickSpeed * (0.5 + Math.random() * 0.6),
-        y: structureBody.velocity.y - kickSpeed * (0.4 + Math.random() * 0.3),
-      });
-      this.Body.setAngularVelocity(structureBody, (Math.random() - 0.5) * 0.6);
+      this._scatterBody(structureBody, this.car.body.position);
+    }
+
+    if (info.type === TYPES.TNT) {
+      this._detonateTNT(structureBody, speedFactor);
+    }
+  }
+
+  /** Directly sets velocity/spin on a body so an impact reads as a visible scatter. */
+  _scatterBody(body, awayFrom) {
+    const dx = body.position.x - awayFrom.x;
+    const dirX = dx === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(dx);
+    const kickSpeed = this.car.forwardSpeed * (1.1 + Math.random() * 0.6);
+    this.Body.setVelocity(body, {
+      x: dirX * kickSpeed * (0.5 + Math.random() * 0.6),
+      y: body.velocity.y - kickSpeed * (0.4 + Math.random() * 0.3),
+    });
+    this.Body.setAngularVelocity(body, (Math.random() - 0.5) * 0.6);
+  }
+
+  /**
+   * Chain-detonates any other not-yet-hit TNT barrels within blast radius of
+   * the one that just went off, breadth-first so a cluster of barrels all
+   * pop in sequence. Chained barrels score their own points and scatter, but
+   * don't hit the car directly (only the barrel actually rammed does that).
+   */
+  _detonateTNT(originBody, speedFactor) {
+    const radius = originBody.wreckrun.def.explosionRadius;
+    const queue = [originBody];
+    let chainCount = 0;
+
+    while (queue.length) {
+      const center = queue.pop();
+      for (const candidate of this.spawner.active) {
+        if (candidate === originBody || candidate.wreckrun.type !== TYPES.TNT || candidate.wreckrun.hit) continue;
+        const dx = candidate.position.x - center.position.x;
+        const dy = candidate.position.y - center.position.y;
+        if (Math.sqrt(dx * dx + dy * dy) > radius) continue;
+
+        candidate.wreckrun.hit = true;
+        chainCount++;
+        const def = candidate.wreckrun.def;
+        this.scoring.registerSmash(def.points, speedFactor, candidate.position.x, candidate.position.y, null);
+        this._scatterBody(candidate, center.position);
+        queue.push(candidate);
+      }
+    }
+
+    if (chainCount >= 1) {
+      this.scoring.callouts.push({ text: `CHAIN x${chainCount + 1}`, age: 0, x: originBody.position.x, y: originBody.position.y - 40 });
     }
   }
 
@@ -239,6 +285,9 @@ export class Game {
   }
 
   _update(dtMs) {
+    this.currentTheme = getThemeForDistance(this.car.distanceMeters);
+    this.car.traction = this.currentTheme.traction;
+
     const steer = this.input.steerDirection;
     this.car.update(this.Body, steer, dtMs);
 
@@ -304,8 +353,9 @@ export class Game {
     }
 
     // Road background
-    this._drawRoadBackground();
-    if (!this.images.bg_road_city) this._drawLaneMarkings(); // fallback art already has lane markings baked in
+    const themeTile = this.images[this.currentTheme.bgSpriteKey];
+    this._drawRoadBackground(themeTile);
+    if (!themeTile) this._drawLaneMarkings(); // fallback color has no baked-in lane markings
 
     if (this.state !== STATE.MENU) {
       this._drawStructures();
@@ -317,6 +367,7 @@ export class Game {
         distanceMeters: this.scoring.distanceMeters,
         healthFraction: this.car.healthFraction,
       });
+      this._drawThemeLabel();
     }
 
     if (this.state === STATE.MENU) {
@@ -343,22 +394,35 @@ export class Game {
     return { level, maxLevel: MAX_UPGRADE_LEVEL, cost, description };
   }
 
-  _drawRoadBackground() {
+  _drawRoadBackground(tile) {
     const { ctx } = this;
-    const tile = this.images.bg_road_city;
     if (!tile) {
-      ctx.fillStyle = "#4a4a4a";
+      ctx.fillStyle = this.currentTheme.fallbackColor;
       ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
       return;
     }
     // Scale the (square) generated tile to the road width, repeat vertically
-    // as the camera scrolls. Seamless-tiling art from Phase 4 pack can drop
-    // in here with no code changes.
+    // as the camera scrolls. Each theme's art drops in here with no code
+    // changes once its PNG exists in assets/sprites/.
     const tileH = GAME_WIDTH * (tile.height / tile.width);
     const offset = ((-this.cameraOffsetY % tileH) + tileH) % tileH;
     for (let y = -tileH + offset; y < GAME_HEIGHT; y += tileH) {
       ctx.drawImage(tile, 0, y, GAME_WIDTH, tileH);
     }
+  }
+
+  _drawThemeLabel() {
+    const { ctx } = this;
+    ctx.save();
+    ctx.textAlign = "right";
+    ctx.textBaseline = "top";
+    ctx.font = "13px system-ui, sans-serif";
+    ctx.fillStyle = "rgba(255,255,255,0.8)";
+    ctx.strokeStyle = "rgba(0,0,0,0.6)";
+    ctx.lineWidth = 3;
+    ctx.strokeText(this.currentTheme.name, GAME_WIDTH - 16, 44);
+    ctx.fillText(this.currentTheme.name, GAME_WIDTH - 16, 44);
+    ctx.restore();
   }
 
   _drawLaneMarkings() {
