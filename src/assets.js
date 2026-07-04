@@ -16,6 +16,14 @@ export const SPRITES = {
   bg_junkyard: "assets/sprites/bg_junkyard.png",
   bg_ice: "assets/sprites/bg_ice.png",
   bg_night: "assets/sprites/bg_night.png",
+  // Phase 5 power-up tokens + coin — not generated yet, same graceful-404
+  // fallback (game.js draws a colored circle + letter icon in the meantime).
+  powerup_boost: "assets/sprites/powerup_boost.png",
+  powerup_ram: "assets/sprites/powerup_ram.png",
+  powerup_magnet: "assets/sprites/powerup_magnet.png",
+  powerup_plow: "assets/sprites/powerup_plow.png",
+  powerup_slowmo: "assets/sprites/powerup_slowmo.png",
+  coin: "assets/sprites/coin.png",
 };
 
 function loadOne(src) {

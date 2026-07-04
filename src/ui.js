@@ -1,6 +1,45 @@
 // ui.js — HUD, menus, game-over screen, pause button hit-testing
 
+import { POWERUP_DEFS } from "./powerups.js";
+
 const PAUSE_BTN = { x: 16, y: 16, w: 44, h: 44 };
+
+const BUFF_LABELS = {
+  boostMs: { text: "BOOST", color: POWERUP_DEFS.boost.color },
+  ramMs: { text: "RAM", color: POWERUP_DEFS.ram.color },
+  magnetMs: { text: "MAGNET", color: POWERUP_DEFS.magnet.color },
+  plowMs: { text: "PLOW", color: POWERUP_DEFS.plow.color },
+  slowMoMs: { text: "SLOW-MO", color: POWERUP_DEFS.slowMo.color },
+};
+
+/** Small pill row under the HUD showing active power-up timers. */
+export function drawBuffBar(ctx, canvasWidth, buffs) {
+  const active = Object.entries(buffs).filter(([, ms]) => ms > 0);
+  if (!active.length) return;
+
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = "bold 12px system-ui, sans-serif";
+
+  const pillW = 90;
+  const pillH = 20;
+  const gap = 8;
+  const totalW = active.length * pillW + (active.length - 1) * gap;
+  let x = canvasWidth / 2 - totalW / 2;
+  const y = 58;
+
+  for (const [key, ms] of active) {
+    const info = BUFF_LABELS[key] || { text: key, color: "#fff" };
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    roundRect(ctx, x, y, pillW, pillH, 6);
+    ctx.fill();
+    ctx.fillStyle = info.color;
+    ctx.fillText(`${info.text} ${(ms / 1000).toFixed(1)}s`, x + pillW / 2, y + pillH / 2 + 1);
+    x += pillW + gap;
+  }
+  ctx.restore();
+}
 
 export function getPauseButtonRect() {
   return PAUSE_BTN;
@@ -87,11 +126,22 @@ export function drawCallouts(ctx, callouts, worldToScreen) {
   ctx.restore();
 }
 
-export function getGarageButtonRect(w, h) {
-  return { x: w / 2 - 90, y: h / 2 + 90, w: 180, h: 44 };
+/** Three menu buttons (Garage / Daily / Stats) laid out side by side. */
+export function getMenuButtonsLayout(w, h) {
+  const btnW = 150;
+  const btnH = 44;
+  const gap = 16;
+  const totalW = btnW * 3 + gap * 2;
+  const startX = w / 2 - totalW / 2;
+  const y = h / 2 + 90;
+  return {
+    garage: { x: startX, y, w: btnW, h: btnH },
+    daily: { x: startX + btnW + gap, y, w: btnW, h: btnH },
+    stats: { x: startX + (btnW + gap) * 2, y, w: btnW, h: btnH },
+  };
 }
 
-export function drawMenu(ctx, w, h, best, coins) {
+export function drawMenu(ctx, w, h, best, coins, dailyBest) {
   ctx.save();
   ctx.fillStyle = "rgba(0,0,0,0.55)";
   ctx.fillRect(0, 0, w, h);
@@ -108,21 +158,29 @@ export function drawMenu(ctx, w, h, best, coins) {
   ctx.fillStyle = "#ccc";
   ctx.fillText("Hold left/right half of screen to steer, or arrow keys / A-D", w / 2, h / 2 + 60);
 
-  const btn = getGarageButtonRect(w, h);
-  ctx.fillStyle = "rgba(255,255,255,0.15)";
-  roundRect(ctx, btn.x, btn.y, btn.w, btn.h, 10);
-  ctx.fill();
-  ctx.strokeStyle = "#ffd23f";
-  ctx.lineWidth = 2;
-  roundRect(ctx, btn.x, btn.y, btn.w, btn.h, 10);
-  ctx.stroke();
-  ctx.fillStyle = "#fff";
-  ctx.font = "bold 18px system-ui, sans-serif";
-  ctx.fillText("GARAGE", w / 2, btn.y + 12);
+  const layout = getMenuButtonsLayout(w, h);
+  const labels = { garage: "GARAGE", daily: "DAILY", stats: "STATS" };
+  for (const key of ["garage", "daily", "stats"]) {
+    const btn = layout[key];
+    ctx.fillStyle = "rgba(255,255,255,0.15)";
+    roundRect(ctx, btn.x, btn.y, btn.w, btn.h, 10);
+    ctx.fill();
+    ctx.strokeStyle = "#ffd23f";
+    ctx.lineWidth = 2;
+    roundRect(ctx, btn.x, btn.y, btn.w, btn.h, 10);
+    ctx.stroke();
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 16px system-ui, sans-serif";
+    ctx.fillText(labels[key], btn.x + btn.w / 2, btn.y + 12);
+  }
 
   ctx.font = "14px system-ui, sans-serif";
   ctx.fillStyle = "#ffd23f";
-  ctx.fillText(`\u{1FA99} ${coins}`, w / 2, btn.y + btn.h + 14);
+  ctx.fillText(
+    `\u{1FA99} ${coins}  •  Today's best: ${dailyBest ?? 0}`,
+    w / 2,
+    layout.garage.y + layout.garage.h + 18
+  );
   ctx.restore();
 }
 
@@ -139,14 +197,15 @@ export function drawPaused(ctx, w, h) {
   ctx.restore();
 }
 
-export function drawGameOver(ctx, w, h, { score, distanceMeters, coinsAwarded }, best, isNewBest) {
+export function drawGameOver(ctx, w, h, { score, distanceMeters, coinsAwarded }, best, isNewBest, extra = {}) {
+  const { dailyMode, dailyBest, newlyCompletedMissions } = extra;
   ctx.save();
   ctx.fillStyle = "rgba(0,0,0,0.65)";
   ctx.fillRect(0, 0, w, h);
   ctx.textAlign = "center";
   ctx.fillStyle = "#fff";
   ctx.font = "bold 40px system-ui, sans-serif";
-  ctx.fillText("WRECKED!", w / 2, h / 2 - 90);
+  ctx.fillText(dailyMode ? "WRECKED! (Daily)" : "WRECKED!", w / 2, h / 2 - 90);
 
   ctx.font = "22px system-ui, sans-serif";
   ctx.fillText(`Score: ${Math.floor(score)}`, w / 2, h / 2 - 40);
@@ -161,7 +220,11 @@ export function drawGameOver(ctx, w, h, { score, distanceMeters, coinsAwarded },
   ctx.fillStyle = "#ffd23f";
   ctx.font = "bold 18px system-ui, sans-serif";
   ctx.fillText(
-    isNewBest ? "NEW BEST!" : `Best: ${best.bestScore}  •  ${best.bestDistance}m`,
+    dailyMode
+      ? `Today's best: ${dailyBest}`
+      : isNewBest
+      ? "NEW BEST!"
+      : `Best: ${best.bestScore}  •  ${best.bestDistance}m`,
     w / 2,
     h / 2 + 40
   );
@@ -169,6 +232,16 @@ export function drawGameOver(ctx, w, h, { score, distanceMeters, coinsAwarded },
   ctx.fillStyle = "#fff";
   ctx.font = "20px system-ui, sans-serif";
   ctx.fillText("Tap to restart", w / 2, h / 2 + 78);
+
+  if (newlyCompletedMissions && newlyCompletedMissions.length) {
+    ctx.font = "bold 14px system-ui, sans-serif";
+    ctx.fillStyle = "#8fd18f";
+    let y = h / 2 + 106;
+    for (const m of newlyCompletedMissions) {
+      ctx.fillText(`✓ ${m.description} (+${m.reward} \u{1FA99})`, w / 2, y);
+      y += 18;
+    }
+  }
   ctx.restore();
 }
 
@@ -302,6 +375,76 @@ export function drawGarage(ctx, w, h, data) {
       ctx.fillText(`\u{1FA99} ${info.cost}`, rect.x + rect.w - 16, rect.y + 60);
       ctx.textAlign = "left";
     }
+  }
+
+  ctx.restore();
+}
+
+export function getStatsBackButtonRect() {
+  return GARAGE_BACK_BTN; // same top-left "< BACK" spot as the garage screen
+}
+
+/** Missions (left column) + recent run history (right column). */
+export function drawStats(ctx, w, h, { missions, history }) {
+  ctx.save();
+  ctx.fillStyle = "#1c1c1c";
+  ctx.fillRect(0, 0, w, h);
+
+  const backBtn = GARAGE_BACK_BTN;
+  ctx.fillStyle = "rgba(255,255,255,0.12)";
+  roundRect(ctx, backBtn.x, backBtn.y, backBtn.w, backBtn.h, 8);
+  ctx.fill();
+  ctx.fillStyle = "#fff";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = "bold 15px system-ui, sans-serif";
+  ctx.fillText("< BACK", backBtn.x + backBtn.w / 2, backBtn.y + backBtn.h / 2);
+
+  ctx.font = "bold 26px system-ui, sans-serif";
+  ctx.fillText("STATS", w / 2, 40);
+
+  const colY = 90;
+  const colW = w * 0.46;
+  const leftX = 40;
+  const rightX = w - 40 - colW;
+
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  ctx.font = "bold 16px system-ui, sans-serif";
+  ctx.fillStyle = "#ffd23f";
+  ctx.fillText("MISSIONS", leftX, colY);
+  ctx.fillText("RECENT RUNS", rightX, colY);
+
+  let y = colY + 28;
+  ctx.font = "13px system-ui, sans-serif";
+  if (!missions.length) {
+    ctx.fillStyle = "#888";
+    ctx.fillText("No missions yet.", leftX, y);
+  }
+  for (const m of missions) {
+    ctx.fillStyle = m.completed ? "#8fd18f" : "#ccc";
+    const mark = m.completed ? "✓" : "•";
+    wrapText(ctx, `${mark} ${m.description} (+${m.reward})`, leftX, y, colW, 16);
+    y += 20;
+    if (y > h - 24) break;
+  }
+
+  y = colY + 28;
+  if (!history.length) {
+    ctx.fillStyle = "#888";
+    ctx.fillText("No runs recorded yet.", rightX, y);
+  }
+  for (const run of history) {
+    ctx.fillStyle = "#fff";
+    const dateStr = new Date(run.date).toLocaleDateString();
+    const tag = run.daily ? " [Daily]" : "";
+    ctx.fillText(`${run.score} pts • ${run.distanceMeters}m${tag}`, rightX, y);
+    ctx.fillStyle = "#888";
+    ctx.font = "11px system-ui, sans-serif";
+    ctx.fillText(dateStr, rightX, y + 13);
+    ctx.font = "13px system-ui, sans-serif";
+    y += 32;
+    if (y > h - 24) break;
   }
 
   ctx.restore();

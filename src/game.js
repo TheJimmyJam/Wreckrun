@@ -12,11 +12,15 @@ import { loadAssets } from "./assets.js";
 import { CAR_DEFS, CAR_ORDER, MAX_UPGRADE_LEVEL, ARMOR_HEALTH_PER_LEVEL, SPEED_BONUS_PER_LEVEL, coinsEarnedForRun } from "./cars.js";
 import * as Economy from "./economy.js";
 import { getThemeForDistance, THEMES } from "./themes.js";
+import { POWERUP_DEFS } from "./powerups.js";
+import { getTodayRng, getDailyBest, submitDailyRun } from "./daily.js";
+import * as Missions from "./missions.js";
+import * as History from "./history.js";
 
 export const GAME_WIDTH = 960;
 export const GAME_HEIGHT = 540;
 
-const STATE = { LOADING: "loading", MENU: "menu", GARAGE: "garage", PLAY: "play", PAUSED: "paused", GAMEOVER: "gameover" };
+const STATE = { LOADING: "loading", MENU: "menu", GARAGE: "garage", STATS: "stats", PLAY: "play", PAUSED: "paused", GAMEOVER: "gameover" };
 
 const CALLOUTS_BY_TYPE = {
   [TYPES.TOWER_BLOCK]: null, // set per-chain below
@@ -75,11 +79,12 @@ export class Game {
     Composite.add(world, [this.wallLeft, this.wallRight]);
   }
 
-  _resetRun() {
+  _resetRun(daily = false) {
     const { Bodies, Composite, world } = this;
 
-    // Clear existing structures
+    // Clear existing structures + pickups
     for (const b of this.spawner.active) Composite.remove(world, b);
+    for (const b of this.spawner.pickups) Composite.remove(world, b);
     if (this.car) Composite.remove(world, this.car.body);
 
     const carDef = CAR_DEFS[Economy.getSelectedCarId()] || CAR_DEFS.sedan;
@@ -90,11 +95,17 @@ export class Game {
     this.car = new Car(Bodies, GAME_WIDTH / 2, 0, carDef, upgrades);
     Composite.add(world, this.car.body);
 
+    // Daily Challenge: swap in a seeded RNG so every player who starts today's
+    // run gets the identical obstacle/pickup layout.
+    this.dailyMode = daily;
+    this.spawner.rng = daily ? getTodayRng() : Math.random;
+
     this.spawner.reset(this.car.body.position.y);
     this.scoring.reset();
     this.cameraOffsetY = 0;
     this.screenCarY = GAME_HEIGHT * 0.76;
     this.currentTheme = THEMES[0];
+    this.runTntChainMax = 0;
   }
 
   _bindCollisions() {
@@ -105,9 +116,30 @@ export class Game {
         const carBody = bodyA.label === "car" ? bodyA : bodyB.label === "car" ? bodyB : null;
         const other = carBody === bodyA ? bodyB : bodyA;
         if (!carBody || !other.wreckrun) continue;
-        this._handleCarStructureHit(other, pair);
+        if (other.wreckrun.pickupKind) {
+          this._handleCarPickup(other);
+        } else {
+          this._handleCarStructureHit(other, pair);
+        }
       }
     });
+  }
+
+  _handleCarPickup(pickupBody) {
+    const info = pickupBody.wreckrun;
+    if (info.collected) return;
+    info.collected = true;
+
+    if (info.pickupKind === "coin") {
+      Economy.addCoins(info.def.value);
+      Missions.incrementStat("coinsCollected", info.def.value);
+    } else if (info.pickupKind === "powerup") {
+      this.car.applyBuff(this.Body, info.powerupType, info.def.durationMs);
+      this.scoring.callouts.push({ text: info.def.label, age: 0, x: pickupBody.position.x, y: pickupBody.position.y - 20 });
+    }
+
+    this.Composite.remove(this.world, pickupBody);
+    this.spawner.removeBody(pickupBody);
   }
 
   _handleCarStructureHit(structureBody, pair) {
@@ -129,6 +161,7 @@ export class Game {
 
     this.scoring.registerSmash(def.points, speedFactor, structureBody.position.x, structureBody.position.y, calloutText);
     this.car.applyImpact(def.kickback, def.damage);
+    this._trackMissionStat(info.type);
 
     // Fling the structure clear of the lane so a "smash" actually reads as
     // one — a force nudge here is too weak to fight Matter's own collision
@@ -140,6 +173,13 @@ export class Game {
     if (info.type === TYPES.TNT) {
       this._detonateTNT(structureBody, speedFactor);
     }
+  }
+
+  _trackMissionStat(type) {
+    if (type === TYPES.CRATE) Missions.incrementStat("cratesSmashed");
+    else if (type === TYPES.GLASS) Missions.incrementStat("glassSmashed");
+    else if (type === TYPES.TOWER_BLOCK) Missions.incrementStat("towerBlocksSmashed");
+    // TNT is tracked in _detonateTNT so origin + chained barrels count together.
   }
 
   /** Directly sets velocity/spin on a body so an impact reads as a visible scatter. */
@@ -182,6 +222,9 @@ export class Game {
       }
     }
 
+    Missions.incrementStat("tntDetonated", chainCount + 1); // origin + every chained barrel
+    this.runTntChainMax = Math.max(this.runTntChainMax || 0, chainCount + 1);
+
     if (chainCount >= 1) {
       this.scoring.callouts.push({ text: `CHAIN x${chainCount + 1}`, age: 0, x: originBody.position.x, y: originBody.position.y - 40 });
     }
@@ -194,6 +237,11 @@ export class Game {
       this._resetRun();
       this.state = STATE.PLAY;
     }
+  }
+
+  _startDailyRun() {
+    this._resetRun(true);
+    this.state = STATE.PLAY;
   }
 
   _togglePause() {
@@ -230,14 +278,21 @@ export class Game {
     if (tap) {
       const scaled = this._cssToGamePoint(tap.x, tap.y);
       if (this.state === STATE.MENU) {
-        const garageBtn = UI.getGarageButtonRect(GAME_WIDTH, GAME_HEIGHT);
-        if (UI.pointInRect(scaled.x, scaled.y, garageBtn)) {
+        const buttons = UI.getMenuButtonsLayout(GAME_WIDTH, GAME_HEIGHT);
+        if (UI.pointInRect(scaled.x, scaled.y, buttons.garage)) {
           this.state = STATE.GARAGE;
+        } else if (UI.pointInRect(scaled.x, scaled.y, buttons.daily)) {
+          this._startDailyRun();
+        } else if (UI.pointInRect(scaled.x, scaled.y, buttons.stats)) {
+          this.state = STATE.STATS;
         } else {
           this._handleTapOrKeyStart();
         }
       } else if (this.state === STATE.GARAGE) {
         this._handleGarageTap(scaled);
+      } else if (this.state === STATE.STATS) {
+        const backBtn = UI.getStatsBackButtonRect();
+        if (UI.pointInRect(scaled.x, scaled.y, backBtn)) this.state = STATE.MENU;
       } else if (this.state === STATE.GAMEOVER) {
         this._handleTapOrKeyStart();
       } else if (this.state === STATE.PLAY || this.state === STATE.PAUSED) {
@@ -288,11 +343,16 @@ export class Game {
     this.currentTheme = getThemeForDistance(this.car.distanceMeters);
     this.car.traction = this.currentTheme.traction;
 
-    const steer = this.input.steerDirection;
-    this.car.update(this.Body, steer, dtMs);
+    // Slow-Mo scales world time (physics, spawning, distance) but not the
+    // buff timers themselves — car.update takes both so Slow-Mo can't extend
+    // its own duration by slowing its own countdown.
+    const slowMoActive = this.car.buffs.slowMoMs > 0;
+    const scaledDtMs = slowMoActive ? dtMs * POWERUP_DEFS.slowMo.timeScale : dtMs;
 
-    const { engine } = this;
-    Matter.Engine.update(engine, dtMs);
+    const steer = this.input.steerDirection;
+    this.car.update(this.Body, steer, scaledDtMs, dtMs);
+
+    Matter.Engine.update(this.engine, scaledDtMs);
 
     this.scoring.addDistance(0); // distance now tracked via car.distanceMeters
     this.scoring.distanceMeters = this.car.distanceMeters;
@@ -306,6 +366,9 @@ export class Game {
     const gone = this.spawner.collectDespawned(this.car.body.position.y);
     if (gone.length) this.Composite.remove(this.world, gone);
 
+    // Coin Magnet: pull nearby uncollected coins toward the car while active.
+    if (this.car.buffs.magnetMs > 0) this._applyMagnetPull();
+
     // Camera follows the car
     this.cameraOffsetY = this.car.body.position.y - this.screenCarY;
 
@@ -315,7 +378,38 @@ export class Game {
       this.best = result;
       this.coinsAwarded = coinsEarnedForRun(this.scoring.score);
       Economy.addCoins(this.coinsAwarded);
+
+      if (this.dailyMode) {
+        this.dailyBestAfterRun = submitDailyRun(this.scoring.score);
+      }
+
+      Missions.recordRunEnd({ distanceMeters: this.scoring.distanceMeters, tntChainThisRun: this.runTntChainMax });
+      this.newlyCompletedMissions = Missions.checkNewlyCompleted(Economy.addCoins);
+      History.recordRun({
+        score: this.scoring.score,
+        distanceMeters: this.scoring.distanceMeters,
+        carId: this.car.carDef.id,
+        daily: this.dailyMode,
+      });
+
       this.state = STATE.GAMEOVER;
+    }
+  }
+
+  /** Coin Magnet: coins are static sensor bodies, so "pulling" them means
+   *  manually repositioning them toward the car each frame rather than
+   *  applying a physics force (static bodies don't integrate velocity). */
+  _applyMagnetPull() {
+    const radius = POWERUP_DEFS.magnet.pullRadius;
+    const carPos = this.car.body.position;
+    for (const body of this.spawner.pickups) {
+      if (body.wreckrun.pickupKind !== "coin" || body.wreckrun.collected) continue;
+      const dx = carPos.x - body.position.x;
+      const dy = carPos.y - body.position.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist > radius || dist < 1) continue;
+      const pullStrength = 0.15; // fraction of remaining distance closed per frame
+      this.Body.setPosition(body, { x: body.position.x + dx * pullStrength, y: body.position.y + dy * pullStrength });
     }
   }
 
@@ -352,6 +446,14 @@ export class Game {
       return;
     }
 
+    if (this.state === STATE.STATS) {
+      UI.drawStats(this.ctx, GAME_WIDTH, GAME_HEIGHT, {
+        missions: Missions.getMissionsWithProgress(),
+        history: History.getHistory(),
+      });
+      return;
+    }
+
     // Road background
     const themeTile = this.images[this.currentTheme.bgSpriteKey];
     this._drawRoadBackground(themeTile);
@@ -359,6 +461,7 @@ export class Game {
 
     if (this.state !== STATE.MENU) {
       this._drawStructures();
+      this._drawPickups();
       this._drawCar();
       UI.drawCallouts(this.ctx, this.scoring.callouts, this._worldToScreen.bind(this));
       UI.drawHUD(this.ctx, GAME_WIDTH, {
@@ -367,11 +470,12 @@ export class Game {
         distanceMeters: this.scoring.distanceMeters,
         healthFraction: this.car.healthFraction,
       });
+      UI.drawBuffBar(this.ctx, GAME_WIDTH, this.car.buffs);
       this._drawThemeLabel();
     }
 
     if (this.state === STATE.MENU) {
-      UI.drawMenu(this.ctx, GAME_WIDTH, GAME_HEIGHT, this.best, Economy.getCoins());
+      UI.drawMenu(this.ctx, GAME_WIDTH, GAME_HEIGHT, this.best, Economy.getCoins(), getDailyBest());
     } else if (this.state === STATE.PAUSED) {
       UI.drawPaused(this.ctx, GAME_WIDTH, GAME_HEIGHT);
     } else if (this.state === STATE.GAMEOVER) {
@@ -381,7 +485,12 @@ export class Game {
         GAME_HEIGHT,
         { score: this.scoring.score, distanceMeters: this.scoring.distanceMeters, coinsAwarded: this.coinsAwarded },
         this.best,
-        this.isNewBest
+        this.isNewBest,
+        {
+          dailyMode: this.dailyMode,
+          dailyBest: this.dailyBestAfterRun,
+          newlyCompletedMissions: this.newlyCompletedMissions,
+        }
       );
     }
   }
@@ -440,6 +549,40 @@ export class Game {
       ctx.stroke();
     }
     ctx.setLineDash([]);
+  }
+
+  _drawPickups() {
+    const { ctx } = this;
+    for (const body of this.spawner.pickups) {
+      const info = body.wreckrun;
+      if (!info || info.collected) continue;
+      const { x, y } = this._worldToScreen(body.position.x, body.position.y);
+      if (y < -80 || y > GAME_HEIGHT + 80) continue;
+      const def = info.def;
+      const sprite = def.sprite && this.images[def.sprite];
+      const radius = (info.pickupKind === "coin" ? 22 : 34) / 2;
+      ctx.save();
+      ctx.translate(x, y);
+      if (sprite) {
+        ctx.drawImage(sprite, -radius, -radius, radius * 2, radius * 2);
+      } else {
+        ctx.beginPath();
+        ctx.arc(0, 0, radius, 0, Math.PI * 2);
+        ctx.fillStyle = def.color;
+        ctx.fill();
+        ctx.strokeStyle = "rgba(0,0,0,0.5)";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        if (info.pickupKind === "powerup") {
+          ctx.fillStyle = "#fff";
+          ctx.font = "bold 16px system-ui, sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(def.icon, 0, 1);
+        }
+      }
+      ctx.restore();
+    }
   }
 
   _drawStructures() {

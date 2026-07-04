@@ -2,9 +2,19 @@
 // Phase 4: hazard mix now varies by theme (themes.js) and lane density ramps
 // up with distance — but never fills all 3 lanes, so there's always at least
 // one safe line through, per the design doc.
+// Phase 5: also spawns coin + power-up pickups in a lane left clear by
+// structures, and accepts a swappable RNG so the daily challenge mode can
+// inject a seeded generator for identical runs.
 
 import { TYPES, createStructureBody, createTower } from "./structures.js";
 import { getThemeForDistance } from "./themes.js";
+import {
+  POWERUP_ORDER,
+  POWERUP_SPAWN_CHANCE_PER_ROW,
+  COIN_SPAWN_CHANCE_PER_ROW,
+  createPowerupBody,
+  createCoinBody,
+} from "./powerups.js";
 
 const SPAWN_SPACING_BASE = 260;   // world units between spawn rows at start
 const SPAWN_SPACING_MIN = 150;    // tightens as distance increases (difficulty ramp)
@@ -13,16 +23,19 @@ const SPACING_TIGHTEN_PER_METER = 0.35;
 const DESPAWN_BEHIND = 900;       // remove bodies this far behind the car
 
 export class Spawner {
-  constructor(Bodies, roadWidth) {
+  constructor(Bodies, roadWidth, rng = Math.random) {
     this.Bodies = Bodies;
     this.roadWidth = roadWidth;
+    this.rng = rng; // swap in a seeded function for daily-challenge determinism
     this.nextSpawnY = -400; // first row ahead of car start
-    this.active = []; // all structure bodies currently in the world
+    this.active = [];  // structure bodies (crates, towers, hazards, TNT, glass)
+    this.pickups = []; // coin + power-up sensor bodies
   }
 
   reset(startY) {
     this.nextSpawnY = startY - 400;
     this.active = [];
+    this.pickups = [];
   }
 
   _spacingFor(distanceMeters) {
@@ -58,22 +71,44 @@ export class Spawner {
     // Lane density ramp: more likely to fill 2 of 3 lanes as distance grows,
     // but NEVER all 3 — the doc requires at least one safe line every row.
     const pTwoLanes = Math.min(0.85, 0.35 + distanceMeters * 0.0006);
-    const numFilled = Math.random() < pTwoLanes ? 2 : 1;
-    const shuffled = lanes.sort(() => Math.random() - 0.5);
+    const numFilled = this.rng() < pTwoLanes ? 2 : 1;
+    const shuffled = [...lanes].sort(() => this.rng() - 0.5);
     const filledLanes = shuffled.slice(0, numFilled);
+    const freeLanes = lanes.filter((l) => !filledLanes.includes(l));
 
     const theme = getThemeForDistance(distanceMeters);
 
     for (const lane of filledLanes) {
-      const laneCenterX = margin + laneWidth * lane + laneWidth / 2;
-      const jitter = (Math.random() - 0.5) * laneWidth * 0.3;
-      const x = laneCenterX + jitter;
-
+      const x = this._laneX(lane, laneWidth, margin);
       created.push(...this._pickAndCreate(x, y, distanceMeters, theme));
     }
 
-    this.active.push(...created);
+    // Pickups only ever spawn in a lane structures didn't take, so they're
+    // always reachable without forcing a smash.
+    if (freeLanes.length > 0) {
+      const pickupLane = freeLanes[Math.floor(this.rng() * freeLanes.length)];
+      const x = this._laneX(pickupLane, laneWidth, margin);
+      const roll = this.rng();
+      if (roll < POWERUP_SPAWN_CHANCE_PER_ROW) {
+        const type = POWERUP_ORDER[Math.floor(this.rng() * POWERUP_ORDER.length)];
+        const body = createPowerupBody(this.Bodies, type, x, y);
+        created.push(body);
+        this.pickups.push(body);
+      } else if (roll < POWERUP_SPAWN_CHANCE_PER_ROW + COIN_SPAWN_CHANCE_PER_ROW) {
+        const body = createCoinBody(this.Bodies, x, y);
+        created.push(body);
+        this.pickups.push(body);
+      }
+    }
+
+    this.active.push(...created.filter((b) => !b.wreckrun.pickupKind));
     return created;
+  }
+
+  _laneX(lane, laneWidth, margin) {
+    const laneCenterX = margin + laneWidth * lane + laneWidth / 2;
+    const jitter = (this.rng() - 0.5) * laneWidth * 0.3;
+    return laneCenterX + jitter;
   }
 
   /** Weighted type pick for one spawn point, scaled by distance + theme mix. */
@@ -90,11 +125,11 @@ export class Spawner {
       { type: TYPES.CRATE, w: 0.32 * theme.mix.crate },
     ];
     const total = weights.reduce((sum, e) => sum + e.w, 0);
-    let roll = Math.random() * total;
+    let roll = this.rng() * total;
     for (const { type, w } of weights) {
       if (roll < w) {
         if (type === TYPES.TOWER_BLOCK) {
-          return createTower(this.Bodies, x, y, 2 + Math.floor(Math.random() * 2));
+          return createTower(this.Bodies, x, y, 2 + Math.floor(this.rng() * 2));
         }
         return [createStructureBody(this.Bodies, type, x, y)];
       }
@@ -103,14 +138,17 @@ export class Spawner {
     return [createStructureBody(this.Bodies, TYPES.CRATE, x, y)]; // floating-point fallback
   }
 
-  /** Returns bodies that have scrolled far behind the car and should be removed. */
+  /** Returns bodies (structures + pickups) that have scrolled far behind the car. */
   collectDespawned(carY) {
-    const gone = this.active.filter((b) => b.position.y > carY + DESPAWN_BEHIND);
+    const goneActive = this.active.filter((b) => b.position.y > carY + DESPAWN_BEHIND);
     this.active = this.active.filter((b) => b.position.y <= carY + DESPAWN_BEHIND);
-    return gone;
+    const gonePickups = this.pickups.filter((b) => b.position.y > carY + DESPAWN_BEHIND);
+    this.pickups = this.pickups.filter((b) => b.position.y <= carY + DESPAWN_BEHIND);
+    return [...goneActive, ...gonePickups];
   }
 
   removeBody(body) {
     this.active = this.active.filter((b) => b.id !== body.id);
+    this.pickups = this.pickups.filter((b) => b.id !== body.id);
   }
 }

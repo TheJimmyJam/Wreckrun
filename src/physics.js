@@ -8,6 +8,7 @@ export const CATEGORY = {
   HAZARD: 0x0004,
   WALL: 0x0008,
   DEBRIS: 0x0010,
+  PICKUP: 0x0020, // power-ups + coins — only ever collides with the car
 };
 
 export function createPhysicsWorld() {
